@@ -33,6 +33,7 @@ jobs:
 
       - name: Merge or open PR
         if: steps.check.outputs.upstream != steps.check.outputs.current
+        id: merge
         run: |
           SHA="${{ steps.check.outputs.upstream }}"
           git config user.name "github-actions[bot]"
@@ -44,6 +45,7 @@ jobs:
             git commit --amend --no-edit
             git pull --rebase origin main
             git push origin main
+            echo "conflict=false" >> $GITHUB_OUTPUT
           else
             git merge --abort
             BRANCH="upstream-sync/$(date +%Y%m%d)"
@@ -53,10 +55,11 @@ jobs:
             git add -A
             git commit -m "chore: upstream sync $(date +%Y-%m-%d) — needs conflict resolution"
             git push origin $BRANCH
+            echo "conflict=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Open PR on conflict
-        if: failure()
+        if: steps.merge.outputs.conflict == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           branch: upstream-sync/${{ steps.check.outputs.upstream }}
