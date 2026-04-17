@@ -42,6 +42,7 @@ jobs:
             echo "$SHA" > .upstream-sha
             git add .upstream-sha
             git commit --amend --no-edit
+            git pull --rebase origin main
             git push origin main
           else
             git merge --abort
