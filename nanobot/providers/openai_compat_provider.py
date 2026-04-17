@@ -714,7 +714,7 @@ class OpenAICompatProvider(LLMProvider):
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         tc_bufs: dict[int, dict[str, Any]] = {}
-        finish_reason = "stop"
+        finish_reason = str | None = None
         usage: dict[str, int] = {}
 
         def _accum_tc(tc: Any, idx_hint: int) -> None:
@@ -807,7 +807,7 @@ class OpenAICompatProvider(LLMProvider):
                 )
                 for b in tc_bufs.values()
             ],
-            finish_reason=finish_reason,
+            finish_reason=finish_reason or "incomplete",
             usage=usage,
             reasoning_content="".join(reasoning_parts) or None,
         )

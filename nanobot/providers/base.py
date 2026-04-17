@@ -711,6 +711,9 @@ class LLMProvider(ABC):
         while True:
             attempt += 1
             response = await call(**kw)
+            if response.finish_reason == "incomplete":
+                logger.warning("Mid-stream abort detected, retrying...")
+                continue
             if response.finish_reason != "error":
                 return response
             last_response = response
