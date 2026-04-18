@@ -65,4 +65,4 @@ jobs:
         with:
           branch: upstream-sync/${{ steps.check.outputs.upstream }}
           title: "⚠️ Upstream sync — Konflikt"
-          body: "Automatischer Merge
+          body: "Automatischer Merge fehlgeschlagen. Bitte manuell auflösen."
