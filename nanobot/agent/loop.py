@@ -114,7 +114,7 @@ class _LoopHook(AgentHook):
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         if self._on_progress:
-            if not self._on_stream:
+            if not self._on_stream and not context.streamed_content:
                 thought = self._loop._strip_think(
                     context.response.content if context.response else None
                 )
@@ -202,6 +202,7 @@ class AgentLoop:
         timezone: str | None = None,
         session_ttl_minutes: int = 0,
         consolidation_ratio: float = 0.5,
+        max_messages: int = 120,
         hooks: list[AgentHook] | None = None,
         unified_session: bool = False,
         disabled_skills: list[str] | None = None,
@@ -259,6 +260,7 @@ class AgentLoop:
             disabled_skills=disabled_skills,
         )
         self._unified_session = unified_session
+        self._max_messages = max_messages if max_messages > 0 else 120
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stacks: dict[str, AsyncExitStack] = {}
@@ -365,9 +367,19 @@ class AgentLoop:
             )
         if self.web_config.enable:
             self.tools.register(
-                WebSearchTool(config=self.web_config.search, proxy=self.web_config.proxy)
+                WebSearchTool(
+                    config=self.web_config.search,
+                    proxy=self.web_config.proxy,
+                    user_agent=self.web_config.user_agent,
+                )
             )
-            self.tools.register(WebFetchTool(proxy=self.web_config.proxy))
+            self.tools.register(
+                WebFetchTool(
+                    config=self.web_config.fetch,
+                    proxy=self.web_config.proxy,
+                    user_agent=self.web_config.user_agent,
+                )
+            )
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound, workspace=self.workspace))
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
@@ -433,6 +445,11 @@ class AgentLoop:
         from nanobot.utils.helpers import strip_think
 
         return strip_think(text) or None
+
+    @staticmethod
+    def _runtime_chat_id(msg: InboundMessage) -> str:
+        """Return the chat id shown in runtime metadata for the model."""
+        return str(msg.metadata.get("context_chat_id") or msg.chat_id)
 
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
@@ -555,7 +572,7 @@ class AgentLoop:
                 user_content = self.context._build_user_content(content, media)
                 runtime_ctx = self.context._build_runtime_context(
                     pending_msg.channel,
-                    pending_msg.chat_id,
+                    self._runtime_chat_id(pending_msg),
                     self.context.timezone,
                 )
                 if isinstance(user_content, str):
@@ -879,10 +896,12 @@ class AgentLoop:
                 channel, chat_id, msg.metadata.get("message_id"),
                 msg.metadata, session_key=key,
             )
-            history = session.get_history(
-                max_tokens=self._replay_token_budget(),
-                include_timestamps=True,
-            )
+            _hist_kwargs: dict[str, Any] = {
+                "max_messages": self._max_messages,
+                "max_tokens": self._replay_token_budget(),
+                "include_timestamps": True,
+            }
+            history = session.get_history(**_hist_kwargs)
             current_role = "assistant" if is_subagent else "user"
 
             # Subagent content is already in `history` above; passing it again
@@ -966,10 +985,12 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
-        history = session.get_history(
-            max_tokens=self._replay_token_budget(),
-            include_timestamps=True,
-        )
+        _hist_kwargs: dict[str, Any] = {
+            "max_messages": self._max_messages,
+            "max_tokens": self._replay_token_budget(),
+            "include_timestamps": True,
+        }
+        history = session.get_history(**_hist_kwargs)
 
         pending_ask_id = pending_ask_user_id(history)
         if pending_ask_id:
@@ -986,7 +1007,7 @@ class AgentLoop:
                 session_summary=pending,
                 media=msg.media if msg.media else None,
                 channel=msg.channel,
-                chat_id=msg.chat_id,
+                chat_id=self._runtime_chat_id(msg),
             )
 
         async def _bus_progress(
