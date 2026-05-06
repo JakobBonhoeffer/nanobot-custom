@@ -33,7 +33,7 @@ Skill discovery — flag [SKILL] when ALL of these are true:
 - A specific, repeatable workflow appeared 2+ times in the conversation history
 - It involves clear steps (not vague preferences like "likes concise answers")
 - It is substantial enough to warrant its own instruction set (not trivial like "read a file")
-- Do not worry about duplicates — the next phase will check against existing skills
+- Do not worry about duplicates — the next phase will check against existing skills and pending suggestions
 
 Do not add: current weather, transient status, temporary errors, conversational filler.
 

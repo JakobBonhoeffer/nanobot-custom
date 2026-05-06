@@ -19,16 +19,14 @@ Do NOT guess paths.
 - Surgical edits only — never rewrite entire files
 - If nothing to update, stop without calling tools
 
-## Skill creation rules (for [SKILL] entries)
-- Use write_file to create skills/<name>/SKILL.md
-- Before writing, read_file `{{ skill_creator_path }}` for format reference (frontmatter structure, naming conventions, quality standards)
-- **Dedup check**: read existing skills listed below to verify the new skill is not functionally redundant. Skip creation if an existing skill already covers the same workflow.
-- Include YAML frontmatter with name and description fields
-- Keep SKILL.md under 2000 words — concise and actionable
-- Include: when to use, steps, output format, at least one example
-- Do NOT overwrite existing skills — skip if the skill directory already exists
-- Reference specific tools the agent has access to (read_file, write_file, exec, web_search, etc.)
-- Skills are instruction sets, not code — do not include implementation code
+## Skill suggestion rules (for [SKILL] entries)
+- Do NOT create skill files. Skill creation requires explicit user approval.
+- Instead, record the suggestion in `skills/_suggestions.md` using edit_file.
+- **Dedup check first**: read `skills/_suggestions.md` AND the existing skills listed below. Skip if:
+  - An existing skill already covers the same workflow, OR
+  - A suggestion for the same workflow already exists in `_suggestions.md`
+- If genuinely new, append one line to the `## Pending` section of `skills/_suggestions.md`:
+  `- **<kebab-case-name>**: <one-line description of the reusable pattern>`
 
 ## Quality
 - Every line must carry standalone value
