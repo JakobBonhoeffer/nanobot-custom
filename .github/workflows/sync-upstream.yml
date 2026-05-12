@@ -1,0 +1,113 @@
+name: Sync upstream releases
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/HKUDS/nanobot.git
+
+      - name: Find latest upstream release tag
+        id: find_tag
+        run: |
+          LATEST_TAG=$(git ls-remote --tags upstream \
+            | awk '{print $2}' \
+            | grep -E '^refs/tags/v[0-9]' \
+            | grep -v '\^{}' \
+            | sed 's|refs/tags/||' \
+            | sort -V \
+            | tail -1)
+
+          CURRENT_TAG=$(cat .upstream-tag 2>/dev/null || echo "none")
+
+          echo "latest=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "current=$CURRENT_TAG" >> $GITHUB_OUTPUT
+          echo "Latest upstream tag: $LATEST_TAG, Current: $CURRENT_TAG"
+
+      - name: Check staleness (kein neuer Release seit 30+ Tagen)
+        if: steps.find_tag.outputs.latest == steps.find_tag.outputs.current
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const lastDate = fs.existsSync('.upstream-tag-date')
+              ? fs.readFileSync('.upstream-tag-date', 'utf8').trim()
+              : '1970-01-01';
+            const days = Math.floor((Date.now() - new Date(lastDate).getTime()) / 86400000);
+            console.log(`Kein neuer Upstream-Release. Letzter Sync: ${lastDate} (${days} Tage her)`);
+
+            if (days < 30) return;
+
+            const tag = '${{ steps.find_tag.outputs.current }}';
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+            });
+            const alreadyOpen = issues.data.some(i => i.title.includes('upstream-stale'));
+            if (!alreadyOpen) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `⏰ upstream-stale: kein neuer Release seit ${days} Tagen (letzter: ${tag})`,
+                body: `Upstream HKUDS/nanobot hat seit **${days} Tagen** keinen neuen Release-Tag gesetzt.\n\nLetzter synced Tag: \`${tag}\`\n\nOptionen:\n- Abwarten\n- Workflow manuell neu triggern\n- Einzelne Commits manuell cherry-picken`,
+              });
+            }
+
+      - name: Fetch and merge new tag
+        if: steps.find_tag.outputs.latest != steps.find_tag.outputs.current && steps.find_tag.outputs.latest != ''
+        id: sync
+        run: |
+          TAG="${{ steps.find_tag.outputs.latest }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch upstream "refs/tags/$TAG:refs/tags/$TAG"
+          git pull --rebase origin main
+
+          if git merge "refs/tags/$TAG" --no-edit -m "chore: sync upstream $TAG"; then
+            echo "$TAG" > .upstream-tag
+            date +%Y-%m-%d > .upstream-tag-date
+            git add .upstream-tag .upstream-tag-date
+            git commit --amend --no-edit
+            git push origin main
+            echo "conflict=false" >> $GITHUB_OUTPUT
+          else
+            git merge --abort
+            BRANCH="upstream-sync/$TAG"
+            git checkout -b "$BRANCH"
+            git merge "refs/tags/$TAG" --no-commit || true
+            echo "$TAG" > .upstream-tag
+            date +%Y-%m-%d > .upstream-tag-date
+            git add -A
+            git commit -m "chore: upstream sync $TAG — needs conflict resolution"
+            git push origin "$BRANCH"
+            echo "conflict=true" >> $GITHUB_OUTPUT
+            echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Open PR on conflict
+        if: steps.sync.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --base main \
+            --head "${{ steps.sync.outputs.branch }}" \
+            --title "⚠️ Upstream sync ${{ steps.find_tag.outputs.latest }} — Konflikt" \
+            --body "Automatischer Merge von \`${{ steps.find_tag.outputs.latest }}\` fehlgeschlagen. Bitte manuell auflösen. Prüfe ob upstream denselben Bug gefixt hat wie der Fork — dann eigenen Fix rausnehmen."
