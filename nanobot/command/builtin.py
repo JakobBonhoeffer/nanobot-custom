@@ -310,6 +310,39 @@ async def cmd_dream_restore(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_dream_review(ctx: CommandContext) -> OutboundMessage:
+    """Zeige Dream-Vorschläge oder lösche sie."""
+    store = ctx.loop.consolidator.store
+    suggestions_file = store.memory_dir / "dream-suggestions.md"
+
+    args = ctx.args.strip().lower()
+
+    if args == "clear":
+        if suggestions_file.exists():
+            suggestions_file.unlink()
+            content = "Dream suggestions cleared."
+        else:
+            content = "No Dream suggestions found."
+    else:
+        if suggestions_file.exists():
+            content = suggestions_file.read_text(encoding="utf-8").strip()
+            if not content:
+                content = "Dream suggestions file is empty."
+        else:
+            content = (
+                "No Dream suggestions yet.\n"
+                "Dream has not run or found nothing to suggest.\n"
+                "Trigger manually with: /dream"
+            )
+
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=content,
+        metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
+    )
+
+
 _HISTORY_DEFAULT_COUNT = 10
 _HISTORY_MAX_COUNT = 50
 _HISTORY_MAX_CONTENT_CHARS = 200
@@ -392,6 +425,7 @@ def build_help_text() -> str:
         "/dream — Manually trigger Dream consolidation",
         "/dream-log — Show what the last Dream changed",
         "/dream-restore — Revert memory to a previous state",
+        "/dream-review [clear] — Show or clear pending Dream suggestions",
         "/help — Show available commands",
     ]
     return "\n".join(lines)
@@ -412,3 +446,5 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/dream-restore", cmd_dream_restore)
     router.prefix("/dream-restore ", cmd_dream_restore)
     router.exact("/help", cmd_help)
+    router.exact("/dream-review", cmd_dream_review)
+    router.prefix("/dream-review ", cmd_dream_review)

@@ -30,6 +30,10 @@ if TYPE_CHECKING:
 # MemoryStore — pure file I/O layer
 # ---------------------------------------------------------------------------
 
+_RAW_ARCHIVE_MAX_CHARS = 4_000        # war 16_000 — Fallback-Dump klein halten
+_ARCHIVE_SUMMARY_MAX_CHARS = 8_000
+_HISTORY_ENTRY_HARD_CAP = 8_000       # war 64_000
+
 class MemoryStore:
     """Pure file I/O for memory files: MEMORY.md, history.jsonl, SOUL.md, USER.md."""
 
@@ -313,15 +317,37 @@ class MemoryStore:
         """Return history entries with a valid cursor > *since_cursor*."""
         return [e for e, c in self._iter_valid_entries() if c > since_cursor]
 
-    def compact_history(self) -> None:
-        """Drop oldest entries if the file exceeds *max_history_entries*."""
-        if self.max_history_entries <= 0:
+    def compact_history(self, max_age_days: int = 90) -> None:
+        """Drop oldest entries exceeding max_history_entries or older than max_age_days."""
+        if self.max_history_entries <= 0 and max_age_days <= 0:
             return
         entries = self._read_entries()
-        if len(entries) <= self.max_history_entries:
+        if not entries:
             return
-        kept = entries[-self.max_history_entries:]
-        self._write_entries(kept)
+        original_count = len(entries)
+
+        if max_age_days > 0:
+            cutoff = datetime.now().timestamp() - max_age_days * 86400
+            kept = []
+            for e in entries:
+                ts_str = e.get("timestamp", "")
+                try:
+                    entry_ts = datetime.strptime(ts_str[:16], "%Y-%m-%d %H:%M").timestamp()
+                    if entry_ts >= cutoff:
+                        kept.append(e)
+                except (ValueError, TypeError):
+                    kept.append(e)
+            entries = kept
+
+        if self.max_history_entries > 0 and len(entries) > self.max_history_entries:
+            entries = entries[-self.max_history_entries:]
+
+        if len(entries) < original_count:
+            self._write_entries(entries)
+            logger.info(
+                "compact_history: dropped {} entries (age>{} days, cap {})",
+                original_count - len(entries), max_age_days, self.max_history_entries,
+            )
 
     # -- JSONL helpers -------------------------------------------------------
 
@@ -704,21 +730,19 @@ _STALE_THRESHOLD_DAYS = 14
 
 
 class Dream:
-    """Two-phase memory processor: analyze history.jsonl, then edit files via AgentRunner.
+    """Analysiert history.jsonl und schreibt Vorschläge in dream-suggestions.md.
 
-    Phase 1 produces an analysis summary (plain LLM call).
-    Phase 2 delegates to AgentRunner with read_file / edit_file tools so the
-    LLM can make targeted, incremental edits instead of replacing entire files.
+    Phase 1: LLM-Analyse (wie bisher).
+    Phase 2 entfällt — kein AgentRunner, keine automatischen Datei-Änderungen.
+    Alle Vorschläge landen in memory/dream-suggestions.md für manuellen Review.
     """
 
-    # Caps on prompt-bound inputs so Dream's LLM calls never exceed the model's
-    # context window just because a file (or a legacy large history entry) grew
-    # unexpectedly. Each file still appears in full via read_file when the agent
-    # needs it in Phase 2 — these caps only bound the Phase 1/2 prompt preview.
     _MEMORY_FILE_MAX_CHARS = 32_000
     _SOUL_FILE_MAX_CHARS = 16_000
     _USER_FILE_MAX_CHARS = 16_000
     _HISTORY_ENTRY_PREVIEW_MAX_CHARS = 4_000
+    _MIN_ENTRIES = 3                  # Mindestanzahl neuer Einträge für Dream-Lauf
+    _SUGGESTIONS_MAX_AGE_DAYS = 30    # Ältere Vorschläge werden automatisch getrimmt
 
     def __init__(
         self,
@@ -726,8 +750,8 @@ class Dream:
         provider: LLMProvider,
         model: str,
         max_batch_size: int = 20,
-        max_iterations: int = 10,
-        max_tool_result_chars: int = 16_000,
+        max_iterations: int = 10,       # ungenutzt, bleibt für API-Kompatibilität
+        max_tool_result_chars: int = 16_000,  # ungenutzt, bleibt für API-Kompatibilität
         annotate_line_ages: bool = True,
     ):
         self.store = store
@@ -736,51 +760,19 @@ class Dream:
         self.max_batch_size = max_batch_size
         self.max_iterations = max_iterations
         self.max_tool_result_chars = max_tool_result_chars
-        # Kill switch for the git-blame-based per-line age annotation in Phase 1.
-        # Default True keeps the #3212 behavior; set False to feed MEMORY.md raw
-        # (e.g. if a specific LLM reacts poorly to the `← Nd` suffix).
         self.annotate_line_ages = annotate_line_ages
-        self._runner = AgentRunner(provider)
-        self._tools = self._build_tools()
+        self._suggestions_file = store.memory_dir / "dream-suggestions.md"
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:
         self.provider = provider
         self.model = model
-        self._runner.provider = provider
-
-    # -- tool registry -------------------------------------------------------
-
-    def _build_tools(self) -> ToolRegistry:
-        """Build a minimal tool registry for the Dream agent."""
-        from nanobot.agent.skills import BUILTIN_SKILLS_DIR
-        from nanobot.agent.tools.filesystem import EditFileTool, ReadFileTool, WriteFileTool
-
-        tools = ToolRegistry()
-        workspace = self.store.workspace
-        # Allow reading builtin skills for reference during skill creation
-        extra_read = [BUILTIN_SKILLS_DIR] if BUILTIN_SKILLS_DIR.exists() else None
-        tools.register(ReadFileTool(
-            workspace=workspace,
-            allowed_dir=workspace,
-            extra_allowed_dirs=extra_read,
-        ))
-        tools.register(EditFileTool(workspace=workspace, allowed_dir=workspace))
-        # write_file resolves relative paths from workspace root, but can only
-        # write under skills/ so the prompt can safely use skills/<name>/SKILL.md.
-        skills_dir = workspace / "skills"
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        tools.register(WriteFileTool(workspace=workspace, allowed_dir=skills_dir))
-        return tools
-
-    # -- skill listing --------------------------------------------------------
 
     def _list_existing_skills(self) -> list[str]:
         """List existing skills as 'name — description' for dedup context."""
         import re as _re
-
         from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 
-        _DESC_RE = _re.compile(r"^description:\s*(.+)$", _re.MULTILINE | _re.IGNORECASE)
+        desc_re = _re.compile(r"^description:\s*(.+)$", _re.MULTILINE | _re.IGNORECASE)
         entries: dict[str, str] = {}
         for base in (self.store.workspace / "skills", BUILTIN_SKILLS_DIR):
             if not base.exists():
@@ -791,28 +783,16 @@ class Dream:
                 skill_md = d / "SKILL.md"
                 if not skill_md.exists():
                     continue
-                # Prefer workspace skills over builtin (same name)
                 if d.name in entries and base == BUILTIN_SKILLS_DIR:
                     continue
                 content = skill_md.read_text(encoding="utf-8")[:500]
-                m = _DESC_RE.search(content)
+                m = desc_re.search(content)
                 desc = m.group(1).strip() if m else "(no description)"
                 entries[d.name] = desc
         return [f"{name} — {desc}" for name, desc in sorted(entries.items())]
 
-    # -- main entry ----------------------------------------------------------
-
     def _annotate_with_ages(self, content: str) -> str:
-        """Append per-line age suffixes to MEMORY.md content.
-
-        Each non-blank line whose age exceeds ``_STALE_THRESHOLD_DAYS`` gets a
-        suffix like ``← 30d`` indicating days since last modification.
-        Returns the original content unchanged if git is unavailable,
-        annotate fails, or the line count doesn't match the age count
-        (which can happen with an uncommitted working-tree edit — better to
-        skip annotation than to tag the wrong line).
-        SOUL.md and USER.md are never annotated.
-        """
+        """Append per-line age suffixes to MEMORY.md content."""
         file_path = "memory/MEMORY.md"
         try:
             ages = self.store.git.line_ages(file_path)
@@ -821,19 +801,14 @@ class Dream:
             return content
         if not ages:
             return content
-
         had_trailing = content.endswith("\n")
         lines = content.splitlines()
-        # If HEAD-blob line count disagrees with the working-tree content we
-        # received, ages would be assigned to the wrong lines — skip entirely
-        # and feed the LLM un-annotated content rather than misleading data.
         if len(lines) != len(ages):
             logger.debug(
-                "line_ages length mismatch for {} (lines={}, ages={}); skipping annotation",
+                "line_ages length mismatch for {} (lines={}, ages={}); skipping",
                 file_path, len(lines), len(ages),
             )
             return content
-
         annotated: list[str] = []
         for line, age in zip(lines, ages):
             if not line.strip():
@@ -848,32 +823,73 @@ class Dream:
             result += "\n"
         return result
 
-    async def run(self) -> bool:
-        """Process unprocessed history entries. Returns True if work was done."""
-        from nanobot.agent.skills import BUILTIN_SKILLS_DIR
+    def _append_suggestions(self, analysis: str, batch: list[dict]) -> None:
+        """Vorschläge an dream-suggestions.md anhängen, alte Einträge trimmen."""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        cursor_from = batch[0]["cursor"]
+        cursor_to = batch[-1]["cursor"]
 
+        entry = f"## {ts} (Cursor {cursor_from}→{cursor_to})\n\n{analysis.strip()}\n\n---\n\n"
+
+        existing = ""
+        if self._suggestions_file.exists():
+            existing = self._suggestions_file.read_text(encoding="utf-8")
+            existing = self._trim_old_suggestions(existing)
+
+        self._suggestions_file.write_text(existing + entry, encoding="utf-8")
+        logger.info("Dream: Vorschläge gespeichert in {}", self._suggestions_file)
+
+    def _trim_old_suggestions(self, content: str) -> str:
+        """Suggestion-Blöcke älter als _SUGGESTIONS_MAX_AGE_DAYS entfernen."""
+        import re
+        cutoff = datetime.now().timestamp() - self._SUGGESTIONS_MAX_AGE_DAYS * 86400
+        blocks = re.split(r'\n---\n\n', content)
+        kept = []
+        for block in blocks:
+            if not block.strip():
+                continue
+            m = re.search(r'## (\d{4}-\d{2}-\d{2} \d{2}:\d{2})', block)
+            if m:
+                try:
+                    block_ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M").timestamp()
+                    if block_ts >= cutoff:
+                        kept.append(block)
+                    else:
+                        logger.debug("Dream: alter Suggestion-Block entfernt ({})", m.group(1))
+                except ValueError:
+                    kept.append(block)
+            else:
+                kept.append(block)
+        if not kept:
+            return ""
+        return "\n---\n\n".join(kept) + "\n---\n\n"
+
+    async def run(self) -> bool:
+        """Unverarbeitete History-Einträge analysieren. Gibt True zurück wenn Arbeit getan wurde."""
         last_cursor = self.store.get_last_dream_cursor()
         entries = self.store.read_unprocessed_history(since_cursor=last_cursor)
         if not entries:
             return False
 
+        if len(entries) < self._MIN_ENTRIES:
+            logger.info(
+                "Dream: nur {} neue Einträge, übersprungen (Minimum: {})",
+                len(entries), self._MIN_ENTRIES,
+            )
+            return False
+
         batch = entries[: self.max_batch_size]
         logger.info(
-            "Dream: processing {} entries (cursor {}→{}), batch={}",
+            "Dream: verarbeite {} Einträge (Cursor {}→{}), Batch={}",
             len(entries), last_cursor, batch[-1]["cursor"], len(batch),
         )
 
-        # Build history text for LLM — cap each entry so a legacy oversized
-        # record (e.g. pre-#3412 raw_archive dump) can't blow up the prompt.
         history_text = "\n".join(
             f"[{e['timestamp']}] "
             f"{truncate_text(e['content'], self._HISTORY_ENTRY_PREVIEW_MAX_CHARS)}"
             for e in batch
         )
 
-        # Current file contents + per-line age annotations (MEMORY.md only).
-        # Each file is capped in the *prompt preview* only; Phase 2 still sees
-        # the full file via the read_file tool.
         current_date = datetime.now().strftime("%Y-%m-%d")
         raw_memory = self.store.read_memory() or "(empty)"
         annotated_memory = (
@@ -889,16 +905,24 @@ class Dream:
             self.store.read_user() or "(empty)", self._USER_FILE_MAX_CHARS,
         )
 
+        existing_skills = self._list_existing_skills()
+        skills_section = ""
+        if existing_skills:
+            skills_section = (
+                "\n\n## Bestehende Skills (keine Duplikate vorschlagen)\n"
+                + "\n".join(f"- {s}" for s in existing_skills)
+            )
+
         file_context = (
-            f"## Current Date\n{current_date}\n\n"
-            f"## Current MEMORY.md ({len(current_memory)} chars)\n{current_memory}\n\n"
-            f"## Current SOUL.md ({len(current_soul)} chars)\n{current_soul}\n\n"
-            f"## Current USER.md ({len(current_user)} chars)\n{current_user}"
+            f"## Aktuelles Datum\n{current_date}\n\n"
+            f"## MEMORY.md ({len(current_memory)} Zeichen)\n{current_memory}\n\n"
+            f"## SOUL.md ({len(current_soul)} Zeichen)\n{current_soul}\n\n"
+            f"## USER.md ({len(current_user)} Zeichen)\n{current_user}"
         )
 
-        # Phase 1: Analyze (no skills list — dedup is Phase 2's job)
         phase1_prompt = (
-            f"## Conversation History\n{history_text}\n\n{file_context}"
+            f"## Konversationshistorie\n{history_text}\n\n"
+            f"{file_context}{skills_section}"
         )
 
         try:
@@ -919,85 +943,20 @@ class Dream:
                 tool_choice=None,
             )
             analysis = phase1_response.content or ""
-            logger.debug("Dream Phase 1 analysis ({} chars): {}", len(analysis), analysis[:500])
+            logger.debug("Dream Analyse ({} Zeichen): {}", len(analysis), analysis[:500])
         except Exception:
-            logger.exception("Dream Phase 1 failed")
+            logger.exception("Dream Phase 1 fehlgeschlagen")
             return False
 
-        # Phase 2: Delegate to AgentRunner with read_file / edit_file
-        existing_skills = self._list_existing_skills()
-        skills_section = ""
-        if existing_skills:
-            skills_section = (
-                "\n\n## Existing Skills\n"
-                + "\n".join(f"- {s}" for s in existing_skills)
-            )
-        phase2_prompt = f"## Analysis Result\n{analysis}\n\n{file_context}{skills_section}"
-
-        tools = self._tools
-        skill_creator_path = BUILTIN_SKILLS_DIR / "skill-creator" / "SKILL.md"
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "system",
-                "content": render_template(
-                    "agent/dream_phase2.md",
-                    strip=True,
-                    skill_creator_path=str(skill_creator_path),
-                ),
-            },
-            {"role": "user", "content": phase2_prompt},
-        ]
-
-        try:
-            result = await self._runner.run(AgentRunSpec(
-                initial_messages=messages,
-                tools=tools,
-                model=self.model,
-                max_iterations=self.max_iterations,
-                max_tool_result_chars=self.max_tool_result_chars,
-                fail_on_tool_error=False,
-            ))
-            logger.debug(
-                "Dream Phase 2 complete: stop_reason={}, tool_events={}",
-                result.stop_reason, len(result.tool_events),
-            )
-            for ev in (result.tool_events or []):
-                logger.info("Dream tool_event: name={}, status={}, detail={}", ev.get("name"), ev.get("status"), ev.get("detail", "")[:200])
-        except Exception:
-            logger.exception("Dream Phase 2 failed")
-            result = None
-
-        # Build changelog from tool events
-        changelog: list[str] = []
-        if result and result.tool_events:
-            for event in result.tool_events:
-                if event["status"] == "ok":
-                    changelog.append(f"{event['name']}: {event['detail']}")
-
-        # Advance cursor — always, to avoid re-processing Phase 1
         new_cursor = batch[-1]["cursor"]
+
+        if not analysis.strip() or analysis.strip().lower() == "(nothing)":
+            logger.info("Dream: nichts zu speichern, Cursor weitergestellt auf {}", new_cursor)
+        else:
+            self._append_suggestions(analysis, batch)
+
         self.store.set_last_dream_cursor(new_cursor)
         self.store.compact_history()
 
-        if result and result.stop_reason == "completed":
-            logger.info(
-                "Dream done: {} change(s), cursor advanced to {}",
-                len(changelog), new_cursor,
-            )
-        else:
-            reason = result.stop_reason if result else "exception"
-            logger.warning(
-                "Dream incomplete ({}): cursor advanced to {}",
-                reason, new_cursor,
-            )
-
-        # Git auto-commit (only when there are actual changes)
-        if changelog and self.store.git.is_initialized():
-            ts = batch[-1]["timestamp"]
-            summary = f"dream: {ts}, {len(changelog)} change(s)"
-            commit_msg = f"{summary}\n\n{analysis.strip()}"
-            sha = self.store.git.auto_commit(commit_msg)
-            if sha:
-                logger.info("Dream commit: {}", sha)
-
+        logger.info("Dream abgeschlossen, Cursor auf {} weitergestellt", new_cursor)
         return True

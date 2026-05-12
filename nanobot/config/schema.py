@@ -36,7 +36,8 @@ class DreamConfig(Base):
     """Dream memory consolidation configuration."""
 
     _HOUR_MS = 3_600_000
-
+    
+    enabled: bool = True # False in config.json -> Dream komplett deaktiviert
     interval_h: int = Field(default=2, ge=1)  # Every 2 hours by default
     cron: str | None = Field(default=None, exclude=True)  # Legacy compatibility override
     model_override: str | None = Field(
@@ -58,7 +59,8 @@ class DreamConfig(Base):
         return CronSchedule(kind="every", every_ms=self.interval_h * self._HOUR_MS)
 
     def describe_schedule(self) -> str:
-        """Return a human-readable summary for logs and startup output."""
+        if not self.enabled:
+            return "disabled"
         if self.cron:
             return f"cron {self.cron} (legacy)"
         hours = self.interval_h

@@ -916,13 +916,16 @@ def _run_gateway(
     agent.dream.max_iterations = dream_cfg.max_iterations
     agent.dream.annotate_line_ages = dream_cfg.annotate_line_ages
     from nanobot.cron.types import CronJob, CronPayload
-    cron.register_system_job(CronJob(
-        id="dream",
-        name="dream",
-        schedule=dream_cfg.build_schedule(config.agents.defaults.timezone),
-        payload=CronPayload(kind="system_event"),
-    ))
-    console.print(f"[green]✓[/green] Dream: {dream_cfg.describe_schedule()}")
+    if dream_cfg.enabled:
+        cron.register_system_job(CronJob(
+            id="dream",
+            name="dream",
+            schedule=dream_cfg.build_schedule(config.agents.defaults.timezone),
+            payload=CronPayload(kind="system_event"),
+        ))
+        console.print(f"[green]✓[/green] Dream: {dream_cfg.describe_schedule()}")
+    else:
+        console.print("[dim]Dream: disabled[/dim]")
 
     async def _open_browser_when_ready() -> None:
         """Wait for the gateway to bind, then point the user's browser at the webui."""
