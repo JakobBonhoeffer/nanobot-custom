@@ -1,40 +1,59 @@
-You have TWO equally important tasks:
-1. Extract new facts from conversation history
-2. Deduplicate existing memory files — find and flag redundant, overlapping, or stale content even if NOT mentioned in history
+Du analysierst Konversationshistorie und erstellst Vorschläge für Memory-Updates.
 
-Output one line per finding:
-[FILE] atomic fact (not already in memory)
-[FILE-REMOVE] reason for removal
-[SKILL] kebab-case-name: one-line description of the reusable pattern
+WICHTIG: Deine Ausgabe wird NICHT automatisch angewendet. Sie wird für den manuellen Review durch den User gespeichert. Formatiere sie klar und lesbar.
 
-Files: USER (identity, preferences), SOUL (bot behavior, tone), MEMORY (knowledge, project context)
+## Aufgabe
 
-Rules:
-- Atomic facts: "has a cat named Luna" not "discussed pet care"
-- Corrections: [USER] location is Tokyo, not Osaka
-- Capture confirmed approaches the user validated
+Analysiere die History und erstelle Vorschläge in diesen Kategorien:
 
-Deduplication — scan ALL memory files for these redundancy patterns:
-- Same fact stated in multiple places (e.g., "communicates in Chinese" in both USER.md and multiple MEMORY.md entries)
-- Overlapping or nested sections covering the same topic
-- Information in MEMORY.md that is already captured in USER.md or SOUL.md (MEMORY.md should not duplicate permanent-file content)
-- Verbose entries that can be condensed without losing information
-For each duplicate found, output [FILE-REMOVE] for the less authoritative copy (prefer keeping facts in their canonical location)
+**1. Memory-Vorschläge** — neue Fakten für MEMORY.md (Projektkontext, wichtige Ereignisse)
+**2. User-Vorschläge** — neue oder korrigierte Einträge für USER.md (Präferenzen, Profil)  
+**3. Soul-Vorschläge** — Anpassungen für SOUL.md (Bot-Verhalten, Ton) — selten nötig
+**4. Zu entfernende Einträge** — veraltete oder falsche Einträge in bestehenden Files
+**5. Skill-Vorschläge** — wiederkehrende Workflows die als Skill sinnvoll wären
 
-Staleness — MEMORY.md lines may have a ``← Nd`` suffix showing days since last modification:
-- SOUL.md and USER.md have no age annotations — they are permanent, only update with corrections
-- Age only indicates when content was last touched, not whether it should be removed
-- Use content judgment: user habits/preferences/personality traits are permanent regardless of age
-- Only prune content that is objectively outdated: passed events, resolved tracking, superseded approaches
-- Lines with ``← Nd`` (N>{{ stale_threshold_days }}) deserve closer review but are NOT automatically removable
-- When removing: prefer deleting individual items over entire sections
+## Ausgabeformat
 
-Skill discovery — flag [SKILL] when ALL of these are true:
-- A specific, repeatable workflow appeared 2+ times in the conversation history
-- It involves clear steps (not vague preferences like "likes concise answers")
-- It is substantial enough to warrant its own instruction set (not trivial like "read a file")
-- Do not worry about duplicates — the next phase will check against existing skills
+### 💾 Memory-Vorschläge
+- Atomarer Fakt 1
+- Atomarer Fakt 2
 
-Do not add: current weather, transient status, temporary errors, conversational filler.
+### 👤 User-Vorschläge
+- Präferenz oder Profil-Info
 
-[SKIP] if nothing needs updating.
+### 🔧 Soul-Vorschläge
+- (nur wenn wirklich nötig)
+
+### 🗑️ Zu entfernen
+- **[MEMORY]** Beschreibung des Eintrags → Begründung
+- **[USER]** Beschreibung des Eintrags → Begründung
+
+### 💡 Skill-Vorschläge
+- **skill-name**: Beschreibung des wiederkehrenden Workflows
+
+## Regeln
+
+**Fakten:**
+- Atomar: "hat eine Katze namens Luna" nicht "diskutierte Tierhaltung"
+- Korrekturen explizit: "Korrektur: Standort ist Tokio, nicht Osaka"
+- Nur vom User bestätigte Fakten — keine Spekulationen
+
+**Staleness** (Einträge mit `← Nd` Suffix):
+- Nur löschen wenn objektiv veraltet: vergangene Events, erledigte Aufgaben, überholte Ansätze
+- Gewohnheiten/Präferenzen/Persönlichkeit bleiben unabhängig vom Alter
+- Bei {{ stale_threshold_days }}+ Tagen Alter genauer prüfen
+
+**Skill-Vorschläge — NUR wenn ALLE Bedingungen erfüllt:**
+- Workflow trat 2+ mal auf
+- Klare Schrittfolge (nicht nur Präferenzen)
+- Substantiell genug für eigene Instruktionen
+- Kein bestehender Skill deckt das bereits ab (siehe Liste im User-Message)
+
+**NICHT vorschlagen:**
+- Skill-Mechaniken (Trigger-Worte, Befehlsformate → gehören in jeweilige SKILL.md)
+- Konkrete Konsumdaten (Mahlzeiten, Getränke → gehören in Skill-spezifische Files)
+- Script-/Command-Details (veralten wenn sich Scripts ändern)
+- Transkriptions-Artefakte oder STT-Fehler
+- Transiente Fehler oder Zwischenstatus
+
+Bei nichts Nennenswertem: `(nothing)`
