@@ -68,7 +68,13 @@ class AutoCompact:
                 continue
             if key in active_session_keys:
                 continue
-            if self._is_expired(info.get("updated_at"), now):
+            updated_at_str = info.get("updated_at")
+            if self._is_expired(updated_at_str, now):
+                elapsed = (now - datetime.fromisoformat(updated_at_str)).total_seconds() if updated_at_str else -1
+                logger.info(
+                    "Auto-compact: triggering archive for {} (updated_at={}, elapsed={:.0f}s, ttl={}min)",
+                    key, updated_at_str, elapsed, self._ttl,
+                )
                 self._archiving.add(key)
                 schedule_background(self._archive(key))
 
