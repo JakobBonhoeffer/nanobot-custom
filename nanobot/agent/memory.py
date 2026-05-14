@@ -30,10 +30,6 @@ if TYPE_CHECKING:
 # MemoryStore — pure file I/O layer
 # ---------------------------------------------------------------------------
 
-_RAW_ARCHIVE_MAX_CHARS = 4_000        # war 16_000 — Fallback-Dump klein halten
-_ARCHIVE_SUMMARY_MAX_CHARS = 8_000
-_HISTORY_ENTRY_HARD_CAP = 8_000       # war 64_000
-
 class MemoryStore:
     """Pure file I/O for memory files: MEMORY.md, history.jsonl, SOUL.md, USER.md."""
 

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 class AutoCompact:
-    _RECENT_SUFFIX_MESSAGES = 8
+    _RECENT_SUFFIX_MESSAGES = 30
 
     def __init__(self, sessions: SessionManager, consolidator: Consolidator,
                  session_ttl_minutes: int = 0):
@@ -68,13 +68,7 @@ class AutoCompact:
                 continue
             if key in active_session_keys:
                 continue
-            updated_at_str = info.get("updated_at")
-            if self._is_expired(updated_at_str, now):
-                elapsed = (now - datetime.fromisoformat(updated_at_str)).total_seconds() if updated_at_str else -1
-                logger.info(
-                    "Auto-compact: triggering archive for {} (updated_at={}, elapsed={:.0f}s, ttl={}min)",
-                    key, updated_at_str, elapsed, self._ttl,
-                )
+            if self._is_expired(info.get("updated_at"), now):
                 self._archiving.add(key)
                 schedule_background(self._archive(key))
 
@@ -83,7 +77,7 @@ class AutoCompact:
             self.sessions.invalidate(key)
             session = self.sessions.get_or_create(key)
             archive_msgs, kept_msgs = self._split_unconsolidated(session)
-            if not archive_msgs and not kept_msgs:
+            if not archive_msgs:
                 session.updated_at = datetime.now()
                 self.sessions.save(session)
                 return
